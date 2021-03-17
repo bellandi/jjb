@@ -1,0 +1,959 @@
+# templates.yaml defines various job and job-group templates used
+# throughout the rest of the jjb configuration.
+#
+# To re-generate jobs after modifying this file, run the
+# continuous_integration/jjb job in Jenkins.
+#
+# Read
+#
+#     https://media.readthedocs.org/pdf/jenkins-job-builder/latest/jenkins-job-builder.pdf
+#
+# to understand this better.
+#
+# The template's 'id' is referenced in "jobs:" lists, e.g.
+#
+#    jobs:
+#      - folder
+#      - basic-pipeline
+#
+# We also use YAML inheritance to subclass templates. The YAML template label
+# &label is referenced with :: < *label for inheritance. For grep'ing
+# convenience we make sure the YAML label is the same as the id, but they're
+# actually unrelated.
+#
+# Jobs are also often indirectly referenced via named job groups.
+#
+# Most of our jobs use the pipeline (workflow) plugin; see
+#
+#   https://docs.openstack.org/infra/jenkins-job-builder/project_pipeline.html
+#   https://wiki.jenkins.io/display/JENKINS/Pipeline+Plugin
+#
+
+# These basic templates are the common base of most of the custom and
+# standard-packaging jobs:
+
+- job-template: &folder
+    name: '{folder_name}'
+    id: 'folder'
+    project-type: folder
+    primary-view: project_view
+    description: 'Generic folder from {template-name} template'
+
+- job-template: &basic-pipeline
+    name: '{name}'
+    folder: '{folder_name}'
+    id: 'basic-pipeline'
+    # Override this in instances to give details:
+    description-prefix: ''
+    description: >
+        <div>{description-prefix}</div>
+        <div>
+          <p><b>About this job</b></p>
+          <p>
+            This is a generic pipeline instance
+            for <code>{name}</code> created from template <code>{id}</code>.
+            This job's pipeline
+            is defined by the <code>{script-path}</code> script from the pipeline repository at
+            <code>{pipeline-url}</code> branch <code>{pipeline-branch-default}</code>. Job templates are defined in
+            the <code>jenkins-job-builder-config</code> repository in the
+            <code>templates/templates.yaml</code> file.
+          </p>
+        </div>
+
+    script-path: Jenkinsfile
+    project-type: pipeline
+    pipeline-url: ssh://git@git.2ndquadrant.com/it/ci/packaging-ci.git
+    mm_chan: 'ci-misc-jobs'
+    # Allow PIPELINE_SCM_GIT_REF param to override the pipeline
+    # branch we use (mainly for testing and emergencies).
+    #
+    # Instances should override pipeline-branch-default instead,
+    # so pipeline-branch remains override-able via a build-parameter.
+    #
+    pipeline-branch: '$PIPELINE_SCM_GIT_REF'
+    pipeline-branch-default: 'master'
+
+    # To be overridden by the instantiating job or by the project
+    pkg_url: ''
+    src_url: ''
+    pkg_ref: 'master'
+    src_ref: 'master'
+
+    # These credentials IDs reference Jenkins credentials objects
+    #   from https://ci.qa.2ndquadrant.com/jenkins/credentials/store/system/
+    # which are managed outside of JJB right now. See ../README.md
+    # section "Jenkins-managed credentials" for details.
+    pkg_credentials_id: ''
+    src_credentials_id: ''
+
+    # User-configurable:
+    parameters:
+        - string: &param_mm_channel
+            name: MM_CHANNEL
+            default: '{mm_chan}'
+            description: 'Name of the mattermost channel (as shown in the URL) for notifications'
+        - string: &param_pipeline_scm_ref
+            name: PIPELINE_SCM_GIT_REF
+            default: '{pipeline-branch-default}'
+            description: 'ADVANCED: Git ref for the packaging pipeline itself'
+    properties:
+        - build-discarder:
+            days-to-keep: 7
+        # Like the 'gitlab-credentials' macro, but accepts credentials
+        # for the packaging repo as well as the source packaging repo.
+        #
+        # Also inject the default branches we build so pipeline jobs can tell
+        # if parameters were overridden.
+        #
+        - inject:
+            properties-content: |
+              PKG_CREDENTIALS_ID={pkg_credentials_id}
+              SRC_CREDENTIALS_ID={src_credentials_id}
+              JOB_DEFAULT_SRC_GIT_REF={src_ref}
+              JOB_DEFAULT_PKG_GIT_REF={pkg_ref}
+    pipeline-scm:
+      scm:
+        - git:
+            url: '{pipeline-url}'
+            name: 'pipeline'
+            branches: [ '{pipeline-branch}' ]
+            wipe-workspace: true
+            scm-name: "Pipeline"
+            # These options only affect cloning of the pipeline repo itself,
+            # not the packaging repo or source repo clones done by the pipeline
+            # script.
+            reference-repo: '$CI_GIT_REFERENCE_REPO'
+            shallow-clone: true
+            do-not-fetch-tags: true
+      script-path: '{script-path}'
+    concurrent: true
+
+# These templates together define the "standard packaging pipeline".
+#
+# The templates here are used by ../std_pipeline_jobs/*.yaml to
+# instantiate specific sets of jobs.
+
+- job-template: &packaging-folder
+    name: '{folder_name}'
+    << : *folder
+    id: 'packaging-folder'
+    description: >
+         <div>
+          <p>
+            This folder contains all jobs from the <code>{name}</code> standard packaging pipeline.
+            <ul>
+             <li>
+              The <a href="job/{name}">main job is <code>{name}</code></a>. This is where you run builds, find build output, and
+              find build logs. See its description.
+             </li>
+             <li>
+              Use <a href="job/{name}-package-repository-publisher"><code>{name}-package-repository-publisher</code></a>
+              to push packages from a successful job execution into other
+              package repositories. See its description for details.
+             </li>
+             <li>
+              <code>deb-pipeline</code> and <code>rpm-pipeline</code> are
+              used by {name}. Ignore them.
+             </li>
+             <li>
+              <code>{name}-scm-polling-observer</code> polls the SCM, if required. Ignore it.
+             </li>
+            </ul>
+           </p>
+         </div>
+
+# The great majority of the main pipeline jobs used in the standard packaging
+# suite use this template via the various job groups defined below.
+- job-template: &std-packaging-main-pipeline
+    id: 'std-packaging-main-pipeline'
+    << : *basic-pipeline
+    default_skip_steps: ''
+    description: >
+        <!--
+          Most of this should move out-of-line once we publish CI docs to documentation.2ndquadrant.com
+          but for now we can't do much about it. The Safe HTML plugin doesn't permit <details/> or
+          use of JavaScript folding, etc.
+        -->
+        <div>{description-prefix}</div>
+        <div>
+          <!-- This should be compacted into a "how to use this" link to the docs -->
+          <ul>
+            <li>To run a build, use <a href="build?delay=0sec">Build with parameters</a></li>
+            <li>
+              To <b>investigate failures</b>, look at the "console output" of the job of interest.
+              (Get <a href="lastBuild/console">last build's console)</a>.
+              The console output has links to child jobs for specific targets.
+            </li>
+            <li>
+              You can <b>find packages, source, etc</b>, in a build's "Artifacts". (<a href="lastBuild">last</a>).
+              Prefer to <b>publish packages to managed repositories</b> rather than downloading them from artifiacts; see
+              <a href="https://access.2ndquadrant.com/kb/a/publishing-packages-from-ci-to-repositories/">the documentation</a>.
+            </li>
+          </ul>
+        </div>
+        <div style="font-size: smaller">
+          <!-- This should be compacted into an attribute list and a "what does this mean?" link to docs -->
+          <p><b>About this job</b></p>
+          <p>
+            This is a standard packaging pipeline instance for project <code>{name}</code>.
+          </p>
+          <p>
+            It has a product-packaging repository at
+            <code>{pkg_url}</code>
+            which controls build targets, contains RPM spec files and the <code>debian/</code> directory,
+            etc.
+          </p>
+          <p>
+            This job's pipeline is defined by the <code>{script-path}</code> Groovy script fetched by default
+            from the pipeline repository at
+            <code>{pipeline-url}</code>
+            on the branch in the <code>PIPELINE_SCM_GIT_REF</code> build-parameter
+            (default <code>{pipeline-branch-default}</code>). (Shared by most products).
+          </p>
+          <p>
+            Job templates are defined in the
+            <a href="https://redmine.2ndquadrant.com/projects/ci/repository/jenkins-job-builder-config"><code>jenkins-job-builder-config</code></a>
+            repository in the <code>templates/templates.yaml</code> file.
+            This and the instance overrides in <code>std_pipeline_jobs/</code>
+            together are what create this job. This main pipeline job used the
+            <code>{id}</code> template.
+          </p>
+         </details>
+        </div>
+    # Only overridden by individual runs:
+    is_release: false
+    # Settings users can override in "build with parameters":
+    parameters:
+      - string:
+          name: SRC_URL
+          default: '{src_url}'
+          description: >
+              <p>
+                URL of the git repo containing the sources of the project we want to build.
+              </p>
+              <p style="font-size: smaller">
+                You don't usually need to change this. If you want to us a
+                different repo it must have public read access or the URL must
+                embed a read-only authentication token you don't mind becoming
+                visible in the job information.
+              </p>
+      - string:
+          name: SRC_GIT_REF
+          default: '{src_ref}'
+          description: >
+              <p>
+                This is the <a href="https://git-scm.com/book/en/v2/Git-Internals-Git-References">git ref</a>
+                of the product source we want to build.
+              </p>
+              <p>
+                It's usually a branch name, but may also be a fully qualified tag name (<code>refs/tags/TAGNAME</code>) or a
+                bare commit hash.
+              </p>
+              <p style="font-size: smaller">
+                <i>Hint: Branches with a "/" in them must use the full <code>refs/heads/BRANCHNAME</code> format.</i>
+              </p>
+      - string:
+          name: PKG_URL
+          default: '{pkg_url}'
+          description: >
+              <p>
+                URL pointing to the git repo that contains everything that is
+                required for the packaging of the project.
+              </p>
+              <p style="font-size: smaller">
+                You don't usually need to change this.
+              </p>
+      - string:
+          name: PKG_GIT_REF
+          default: '{pkg_ref}'
+          description: >
+              <p>Git ref for the packaging repository.</p>
+              <p style="font-size: smaller">
+               If different source branches require different packaging then by
+               convention we use the same branch name for the source branch as
+               the packaging branch. e.g. if <code>SRC_GIT_REF</code> is
+               <code>REL2_0_STABLE</code> you may need to set
+               <code>PKG_GIT_REF</code> to <code>REL2_0_STABLE</code> too.
+              </p>
+      - bool:
+          name: IS_RELEASE
+          default: '{is_release}'
+          description: >
+                <p>
+                  Check to produce a release build. Requires that use of tag-refs
+                  for <i>both</i> <code>SRC_GIT_REF</code> <i>and</i> <code>PKG_GIT_REF</code>
+                </p>
+                <p>
+                 See <a href="https://access.2ndquadrant.com/kb/a/publishing-packages-from-ci-to-repositories/">the documentation</a>.
+                </p>
+      - string: *param_mm_channel
+      - string: *param_pipeline_scm_ref
+      - string:
+          name: SKIP_STEPS
+          default: '{default_skip_steps}'
+          description: >
+                  <p style="font-size: smaller">
+                    <b>Advanced.</b> Comma-separated list of steps to skip in
+                    this build. Forces build result to <code>UNSTABLE</code>
+                    and may cause failures in later steps.
+                  </p>
+                  <p style="font-size: smaller">
+                    Steps include code-analysis, unit-tests,
+                    acceptance-tests-upstream, coverity, rpm, deb, sles,
+                    acceptance-tests-downstream, smoke-tests, packages_upload,
+                    publisher.  For rpm and deb, rpm/somelabel and
+                    deb/somelabel are supported to suppress specific builder
+                    labels.
+                  </p>
+      - string:
+          name: EXTRA_BUILD_TITLE
+          default: ''
+          description: >
+                  <p>Add your own short text to the build title here.</p>
+      - string:
+          name: EXTRA_BUILD_DESCRIPTION
+          default: ''
+          description: >
+                  <p>Add a description of what this custom build is for here.</p>
+      - string:
+          name: REDMINE_ISSUE
+          default: ''
+          description: >
+                  <p>
+                    If this is a build for a specific Redmine issue put the
+                    issue number or URL here.
+                  </p>
+                  <p style="font-size: smaller">
+                    Accepts RMXXX, RM#XXX, XXXX, redmine URLs.
+                  </p>
+      - string:
+          name: GITLAB_MERGE_REQUEST
+          default: ''
+          description: >
+                  <p>
+                    If this is a build for a specific GitLab merge request or
+                    issue put the MR number URL here.
+                  </p>
+      - string:
+          name: GITHUB_ISSUE_OR_PR
+          default: ''
+          description: >
+                  <p>
+                    If this is a build for a specific GitHub pull request or
+                    issue put the PR or issue number or URL here.
+                  </p>
+
+- job-template: &std-packaging-main-pipeline-misc
+    id: 'std-packaging-main-pipeline-misc'
+    << : *std-packaging-main-pipeline
+    name: '{name}-misc'
+    # "misc" runs don't publish
+    default_skip_steps: 'packages_upload,publisher'
+    description: >
+      This pipeline is for manually invoked build jobs. It works the same as
+      the main pipeline except that the built docs and packages don't get
+      published by default.
+
+      This helps prevent issues when trying out packaging changes etc, since
+      jobs here won't affect the various integration test runs etc. It also
+      reduces noise in the main pipeline.
+    
+
+
+# This template is used for the rpm and deb packaging pipelines, which are
+# triggered by the top-level standard packaging pipeline job. That in turn is
+# triggered by a user "build with parameters" or by an observer job firing.
+#
+# So this job shouldn't be run directly by the user, except maybe for rebuilding
+# it after patching issues in the source/pkg repos. And it shouldn't have any
+# triggers: section.
+#
+- job-template: &std-packaging-pkgtype-pipeline
+    name: '{pkgtype}-pipeline'
+    id: 'std-packaging-pkgtype-pipeline'
+    <<  : *basic-pipeline
+    description: >
+        <p>
+         {pkgtype} package-generating pipeline for {name} from {id} template.
+        </p>
+        <p>
+         These jobs are triggered from the main job template at
+         {name}/{name} to build packages for a specific distro/version.
+        </p>
+        <p>
+         <b>
+          You shouldn't start this job directly, or need to look at its built
+          artifacts. The only reason to look at it is to see the error logs of
+          a specific instance in case of failure.
+         </b>
+        </p>
+        <p>
+         To find packages, look at the <a href="../{name}">main job</a>'s artifacts.
+        </p>
+        <p>
+         To find error logs, view the main job's console output and follow
+         links from there to specific instances of packaging jobs.
+        </p>
+    pipeline-branch: '$PIPELINE_SCM_GIT_REF'
+    pipeline-branch-default: 'master'
+    parameters:
+      - string:
+          name: SRC_URL
+          default: ''
+          description: 'Source repository. Forwarded from parent job.'
+      - string:
+          name: PKG_GIT_REF
+          default: ''
+          description: 'Source git ref. Forwarded from parent job.'
+      - string:
+          name: PKG_URL
+          default: ''
+          description: 'Packaging repository. Forwarded from parent job.'
+      - string:
+          name: SRC_GIT_REF
+          default: ''
+          description: 'Packaging git ref. Forwarded from parent job.'
+      - string:
+          name: PARENT_BUILD_ID
+          default: ''
+          description: 'Job-id of the parent job that triggered this build.'
+      - string:
+          name: PARENT_JOB_NAME
+          default: ''
+          description: 'Name of the parent job that triggered this build.'
+      - string:
+          name: LABEL
+          default: ''
+          description: 'Label for the package we want to build (see <code>config.yml</code>). Supplied by parent job. This controls which OS/version/pgvesion this job builds packages for.'
+      - string:
+          name: SRC_GIT_COMMIT
+          default: ''
+          description: >
+                <p>
+                  Commit hash for the source commit we are building. Resolved
+                  from <code>SRC_GIT_REF</code> by parent job. Prevents races
+                  with concurrent pushes and rebases.
+                </p>
+                <p>
+                  <b>Set this to the empty string if you want to override the
+                  commit from the parent build and re-check the
+                  <code>SRC_GIT_REF</code></b>
+                </p>
+      - string:
+          name: PKG_GIT_COMMIT
+          default: ''
+          description: >
+                <p>
+                  Commit hash for the packaging repostory commit we are
+                  building. Resolved from <code>PKG_GIT_REF</code> by parent
+                  job. Prevents races with concurrent pushes and rebases.
+                </p>
+                <p>
+                  <b>Set this to the empty string if you want to override the
+                  commit from the parent build and re-check the
+                  <code>PKG_GIT_REF</code></b>
+                </p>
+      - string:
+          name: VERSION
+          default: ''
+          description: 'Base version extracted from the sources to build. Looked up by parent job (<code>get-version.sh</code>) and forwarded.'
+      - string:
+          name: EXTRA_VERSION
+          default: ''
+          description: 'Optional extra-version from sources. Forwarded from parent job.'
+      - string:
+          name: FULL_VERSION
+          default: ''
+          description: 'Fully formatted version string with version, extra-version and packaging revision. Forwarded from parent job.'
+      - bool:
+          name: IS_RELEASE
+          default: false
+          description: 'Release-mode flag. Forwarded from parent job.'
+      - string:
+          name: MM_CHANNEL
+          default: '{mm_chan}'
+          description: 'Name of the mattermost channel (as shown in the URL) for notifications. Forwarded from parent job.'
+      - string:
+          name: PIPELINE_SCM_GIT_REF
+          default: ''
+          description: 'Git ref for the packaging pipeline itself. Forwarded from parent job.'
+      - string:
+          name: SKIP_STEPS
+          default: ''
+          description: >
+                  <p style="font-size: smaller">
+                    <b>Advanced.</b> Comma-separated list of steps to skip in
+                    this build. Forces build result to <code>UNSTABLE</code>
+                    and may cause failures in later steps.
+                  </p>
+                  <p style="font-size: smaller">
+                    Steps include code-analysis, unit-tests,
+                    acceptance-tests-upstream, coverity, rpm, deb, sles,
+                    acceptance-tests-downstream, smoke-tests, packages_upload,
+                    publisher.  For rpm and deb, rpm/somelabel and
+                    deb/somelabel are supported to suppress specific builder
+                    labels.
+                  </p>
+      - string:
+          name: EXTRA_BUILD_TITLE
+          default: ''
+          description: 'Forwarded from parent job.'
+      - string:
+          name: EXTRA_BUILD_DESCRIPTION
+          default: ''
+          description: 'Forwarded from parent job.'
+      - string:
+          name: REDMINE_ISSUE
+          default: ''
+          description: 'Forwarded from parent job.'
+      - string:
+          name: GITLAB_MERGE_REQUEST
+          default: ''
+          description: 'Forwarded from parent job.'
+      - string:
+          name: GITHUB_ISSUE_OR_PR
+          default: ''
+          description: 'Forwarded from parent job.'
+
+# Variant of the basic pipeline with a timer
+- job-template: &timed-basic-pipeline
+    id: 'timed-basic-pipeline'
+    << : *basic-pipeline
+    triggers:
+        - timed_only_on_production:
+            timer_production: '{timed}'
+
+# Variant of the main pipeline with a timer
+- job-template: &timed-std-packaging-main-pipeline
+    id: 'timed-std-packaging-main-pipeline'
+    << : *std-packaging-main-pipeline
+    triggers:
+        - timed_only_on_production:
+            timer_production: '{timed}'
+
+#
+# Observer job: trigger main pipeline job builds in response to changes in the
+# SCM.
+#
+# The main pipeline job doesn't declare the SCM details for the sources
+# to be built directly to Jenkins in jjb. Instead the checkout of the sources
+# is done by our jenkins-ci repo vars/gitCheckout.groovy helper step. This
+# means that Jenkins itself cannot see when the main pipeline's source
+# repo changes in order to poll and trigger builds for new pushes.
+#
+# To handle that we have a simple non-pipeline "observer" job. Its only
+# task is to poll for changes to the product SCM (but not packaging SCM
+# or pipeline SCM) and trigger the main pipeline build with the changed
+# branch when change(s) are detected.
+#
+# It isn't usually built manually, but it can be to force immediate polling
+# to happen.
+#
+# This job doesn't run any normal build code. It just "builds" a trigger
+# for another job. But code builders could be added if needed to generate
+# properties files, filter the builds, etc. Or we can make it a simple
+# Pipeline job that uses the 'build' step to trigger the main pipeline
+# job when the desired conditions are met; it doesn't matter really.
+#
+- job-template:
+    name: '{name}-scm-polling-observer'
+    folder: '{folder_name}'
+    id: 'scm-polling-observer'
+    description: |
+        <p>
+         SCM polling observer job for {name}. Triggers new builds based on polling of
+         {src_url} branches {branches}.
+        </p>
+        <p>
+         <b>You don't need to run this directly</b>. If you want to trigger a build
+         you should <a href="../{name}/build">use "build with parameters" on the main pipeline job</a>
+         instead.
+        </p>
+    sandbox: false
+    disabled: false
+    project-type: freestyle
+    properties:
+        - build-discarder:
+            days-to-keep: 7
+    concurrent: true
+    src_url: ''
+    branches:
+        - 'master'
+        - 'mergeq'
+    scm:
+        - git:
+            url: '{src_url}'
+            name: 'project-src'
+            branches: '{branches}'
+            local-branch: '**'
+            scm-name: "Project SCM"
+            credentials-id: '{src_credentials_id|}'
+            reference-repo: '$CI_GIT_REFERENCE_REPO'
+            do-not-fetch-tags: true
+    #
+    # Pass through some environment variables set by the polling job
+    # as build-parameters for the triggered main pipeline job.
+    #
+    # This is how we tell the main job being triggered which git ref it should
+    # be building (SRC_GIT_REF), based on the ref the poller detected changes
+    # in ($GIT_LOCAL_BRANCH).
+    #
+    # For available variables see:
+    #
+    #   * https://plugins.jenkins.io/git/
+    #
+    # Note that arbitrary parameter strings may be sent. You aren't restricted
+    # to the parameters pre-declared by the job being built. But you can also
+    # pass properties files etc, not just params.
+    #
+    # Empty env-vars are fine, they'll just pass through as empty.
+    #
+    # NOTE: If you want these vars to pass-through to child jobs of the master
+    # pipeline job like the rpm and deb builders, you must explicitly cause
+    # that to happen by passing them through in the main packaging-ci
+    # Jenkinsfile's buildJob() calls. Otherwise they'll only be available
+    # to the parent.
+    #
+    # Details on specific variables:
+    #
+    # gitlabBranch is set for push triggers. gitlabSourceBranch and
+    # gitlabTargetBranch are set for merge request triggers.
+    # The gitlabTargetBranch can be used to skip merge request triggers for
+    # branches we aren't interested in for this job, since gitlab doesn't
+    # offer a branch filter for those.
+    #
+    scm-polling-observer-call-parameters: |
+                SRC_GIT_REF=$GIT_LOCAL_BRANCH
+                gitlabBranch=$gitlabBranch
+                gitlabSourceBranch=$gitlabSourceBranch
+                gitlabTargetBranch=$gitlabTargetBranch
+                gitlabActionType=$gitlabActionType
+                gitlabMergeRequestTitle="$gitlabMergeRequestTitle"
+                gitlabMergeRequestId=$gitlabMergeRequestId
+                gitlabMergeRequestState=$gitlabMergeRequestState
+                gitlabMergeRequestTargetProjectId=$gitlabMergeRequestTargetProjectId
+    #
+    # The "trigger-builds" builder is documented here:
+    #
+    #   https://docs.openstack.org/infra/jenkins-job-builder/builders.html#builders.trigger-builds
+    #
+    builders:
+        - trigger-builds:
+            - project: '{name}'
+              predefined-parameters: '{scm-polling-observer-call-parameters}'
+    triggers:
+        - github:
+        - pollscm:
+            cron: ''
+        # gitlab informs the observer of changes, and it forwards details
+        # to the main pipeline job. Branch filter affects merge requests
+        # as well as pushes.
+        - "gitlab-trigger":
+            include_branches: '{obj:branches}'
+    publishers:
+        - chuck-norris
+
+- job-template:
+    name: '{name}-package-repository-publisher'
+    folder: '{folder_name}'
+    id: 'package-repository-publisher-pipeline'
+    description: >
+        <p>
+         Publisher job for <code>{name}</code>. Copies packages produced by successful
+         <a href="../{name}">main pipeline job <code>{name}/{name}</code></a> from
+         the <code>ci-spool</code> package repositories to other more widely
+         accessible package repositories.
+        </p>
+        <p>
+         Run a publish job using "build with parameters". See
+         <a href="https://access.2ndquadrant.com/kb/a/publishing-packages-from-ci-to-repositories/">the documentation</a>.
+        </p>
+        <p>
+         <b>Make sure you choose the right target repository</b>. Check the product page
+         on portal if in doubt, or check the main job's recommended repository in its
+         build summary. The repository is <i>not</i> auto-filled.
+        </p>
+    sandbox: false
+    disabled: false
+    project-type: pipeline
+    properties:
+        - build-discarder:
+            days-to-keep: 7
+    concurrent: true
+    pipeline-url: ssh://git@git.2ndquadrant.com/it/ci/packaging-ci.git
+    parameters:
+        - choice:
+            name: COMMAND
+            choices:
+                - 'add'
+                - 'del'
+            description: "Add or delete an upload from a repo"
+        - choice:
+            name: REPO
+            choices:
+                - 'ci-spool/2ndqpostgres'
+                - 'ci-spool/data-collector'
+                - 'ci-spool/bdr2'
+                - 'ci-spool/bdr3'
+                - 'ci-spool/bdr3_6'
+                - 'ci-spool/bdr_enterprise_3_6'
+                - 'ci-spool/default'
+                - 'ci-spool/dw-xl'
+                - 'ci-spool/harp'
+                - 'ci-spool/livecompare'
+                - 'ci-spool/pglogical3_6'
+                - 'ci-spool/pglogical3-plugins'
+                - 'ci-spool/postgresql'
+                - 'ci-spool/postgres-xl'
+                - 'ci-spool/tpa'
+                - 'ci-spool/fast_redo'
+                - 'dl/default'
+                - 'products/2ndqpostgres'
+                - 'products/data-collector'
+                - 'products/bdr2'
+                - 'products/bdr3'
+                - 'products/bdr3_6'
+                - 'products/bdr_enterprise_3_6'
+                - 'products/postgres-xl'
+                - 'products/server-ssl-passphrase-callback'
+                - 'products/default'
+                - 'products/harp'
+                - 'products/livecompare'
+                - 'products/pglogical3'
+                - 'products/pglogical3_6'
+                - 'products/pci-securitypack'
+                - 'products/pglogical3-plugins'
+                - 'products/postgresql'
+                - 'products/bdr_enterprise_3_7'
+                - 'products/pglogical3_7'
+                - 'products/bdr3_7'
+                - 'products/tpa'
+                - 'products/fast_redo'
+                - 'private-packages/default'
+            description: 'The repo in which to add/delete the upload'
+        - run:
+            name: BUILD_ID
+            project-name: '{folder_name}/{name}'
+            description: 'The build which has generated the upload'
+    pipeline-scm:
+        scm:
+            - git:
+                url: '{pipeline-url}'
+                name: 'pipeline'
+                branches: [ 'master' ]
+                wipe-workspace: true
+                scm-name: "Pipeline"
+        script-path: 'Jenkinsfile-commands'
+
+# This template is used for the rpm and deb packaging pipelines.
+- job-template:
+    name: '{name}-valgrind-scan'
+    folder: '{folder_name}'
+    id: 'valgrind-scan'
+    triggers:
+      - timed: '@daily'
+    description: >
+        <p>
+         Valgrind is an instrumentation framework for building dynamic analysis tools.
+         This pipeline executes tests running postgres under valgrind.
+        </p>
+    script-path: Jenkinsfile-valgrind
+    project-type: pipeline
+    pipeline-url: ssh://git@git.2ndquadrant.com/it/ci/packaging-ci.git
+    pipeline-branch: '$PIPELINE_SCM_GIT_REF'
+    pipeline-branch-default: 'master'
+
+    # To be overridden by the instantiating job or by the project
+    pkg_url: ''
+    src_url: ''
+    pkg_ref: 'master'
+    src_ref: 'master'
+    pkg_credentials_id: ''
+    src_credentials_id: ''
+    
+    # Settings users can override in "build with parameters":
+    parameters:
+      - string:
+          name: SRC_URL
+          default: '{src_url}'
+          description: >
+              <p>
+                URL of the git repo containing the sources of the project we want to build.
+              </p>
+              <p style="font-size: smaller">
+                You don't usually need to change this. If you want to us a
+                different repo it must have public read access or the URL must
+                embed a read-only authentication token you don't mind becoming
+                visible in the job information.
+              </p>
+      - string:
+          name: SRC_GIT_REF
+          default: '{src_ref}'
+          description: >
+              <p>
+                This is the <a href="https://git-scm.com/book/en/v2/Git-Internals-Git-References">git ref</a>
+                of the product source we want to build.
+              </p>
+              <p>
+                It's usually a branch name, but may also be a fully qualified tag name (<code>refs/tags/TAGNAME</code>) or a
+                bare commit hash.
+              </p>
+              <p style="font-size: smaller">
+                <i>Hint: Branches with a "/" in them must use the full <code>refs/heads/BRANCHNAME</code> format.</i>
+              </p>
+      - string:
+          name: PKG_URL
+          default: '{pkg_url}'
+          description: >
+              <p>
+                URL pointing to the git repo that contains everything that is
+                required for the packaging of the project.
+              </p>
+              <p style="font-size: smaller">
+                You don't usually need to change this.
+              </p>
+      - string:
+          name: PKG_GIT_REF
+          default: '{pkg_ref}'
+          description: >
+              <p>Git ref for the packaging repository.</p>
+              <p style="font-size: smaller">
+               If different source branches require different packaging then by
+               convention we use the same branch name for the source branch as
+               the packaging branch. e.g. if <code>SRC_GIT_REF</code> is
+               <code>REL2_0_STABLE</code> you may need to set
+               <code>PKG_GIT_REF</code> to <code>REL2_0_STABLE</code> too.
+              </p>
+      - string:
+          name: PIPELINE_SCM_GIT_REF
+          default: '{pipeline-branch-default}'
+          description: 'ADVANCED: Git ref for the packaging pipeline itself'
+      - string:
+          name: SRC_GIT_COMMIT
+          default: ''
+          description: >
+              <p>
+                Commit hash for the source commit we are building. Resolved
+                from <code>SRC_GIT_REF</code> by parent job. Prevents races
+                with concurrent pushes and rebases.
+              </p>
+              <p>
+                <b>Set this to the empty string if you want to override the
+                commit from the parent build and re-check the
+                <code>SRC_GIT_REF</code></b>
+              </p>
+      - string:
+          name: PKG_GIT_COMMIT
+          default: ''
+          description: >
+              <p>
+                Commit hash for the packaging repostory commit we are
+                building. Resolved from <code>PKG_GIT_REF</code> by parent
+                job. Prevents races with concurrent pushes and rebases.
+              </p>
+              <p>
+                <b>Set this to the empty string if you want to override the
+                commit from the parent build and re-check the
+                <code>PKG_GIT_REF</code></b>
+              </p>
+    sandbox: false
+    disabled: false
+    properties:
+        - build-discarder:
+            days-to-keep: 7
+        # Like the 'gitlab-credentials' macro, but accepts credentials
+        # for the packaging repo as well as the source packaging repo.
+        #
+        # Also inject the default branches we build so pipeline jobs can tell
+        # if parameters were overridden.
+        #
+        - inject:
+            properties-content: |
+              PKG_CREDENTIALS_ID={pkg_credentials_id}
+              SRC_CREDENTIALS_ID={src_credentials_id}
+              JOB_DEFAULT_SRC_GIT_REF={src_ref}
+              JOB_DEFAULT_PKG_GIT_REF={pkg_ref}
+    concurrent: true
+    pipeline-scm:
+      scm:
+        - git:
+            url: '{pipeline-url}'
+            name: 'pipeline'
+            branches: [ '{pipeline-branch}' ]
+            wipe-workspace: true
+            scm-name: "Pipeline"
+      script-path: '{script-path}' 
+    concurrent: true
+
+# Almost every standard pipeline job instance uses this:
+- job-group:
+    name: std_packaging_job_group
+    jobs:
+        - packaging-folder
+        - scm-polling-observer
+        - std-packaging-main-pipeline
+        - std-packaging-main-pipeline-misc
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: coverity
+            script-path: 'Jenkinsfile-coverity'
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: rpm
+            script-path: 'Jenkinsfile-rpms'
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: deb
+            script-path: 'Jenkinsfile-debs'
+        - package-repository-publisher-pipeline
+
+- job-group:
+    name: timed_packaging_job_group
+    jobs:
+        - packaging-folder
+        - scm-polling-observer
+        - timed-std-packaging-main-pipeline
+        - std-packaging-main-pipeline-misc
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: rpm
+            script-path: 'Jenkinsfile-rpms'
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: deb
+            script-path: 'Jenkinsfile-debs'
+        - package-repository-publisher-pipeline
+
+
+- job-group:
+    name: deb_only_packaging_job_group
+    jobs:
+        - packaging-folder
+        - scm-polling-observer
+        - std-packaging-main-pipeline
+        - std-packaging-main-pipeline-misc
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: deb
+            script-path: 'Jenkinsfile-debs'
+        - package-repository-publisher-pipeline
+
+- job-group:
+    name: rpm_only_packaging_job_group
+    jobs:
+        - packaging-folder
+        - scm-polling-observer
+        - std-packaging-main-pipeline
+        - std-packaging-main-pipeline-misc
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: rpm
+            script-path: 'Jenkinsfile-rpms'
+        - package-repository-publisher-pipeline
+
+- job-group:
+    name: std_packaging_no_polling_job_group
+    jobs:
+        - packaging-folder
+        - std-packaging-main-pipeline
+        - std-packaging-main-pipeline-misc
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: rpm
+            script-path: 'Jenkinsfile-rpms'
+        - std-packaging-pkgtype-pipeline:
+            pkgtype: deb
+            script-path: 'Jenkinsfile-debs'
+        - package-repository-publisher-pipeline

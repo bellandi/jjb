@@ -1,0 +1,8 @@
+- project:
+    name: 'repmgr'
+    folder_name: 'repmgr'
+    src_url: 'git@github.com:EnterpriseDB/repmgr.git'
+    pkg_url: 'git@github.com:EnterpriseDB/repmgr-packaging.git'
+    mm_chan: 'ci-repmgr-jobs'
+    jobs:
+        - std_packaging_job_group
